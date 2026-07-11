@@ -1,0 +1,16 @@
+{
+  "name": "pi-agui-bridge",
+  "version": "0.1.0",
+  "description": "Pi package exposing a localhost AG-UI-style bridge for a web app.",
+  "type": "module",
+  "keywords": ["pi-package", "ag-ui", "bridge"],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "scripts": {
+    "check": "node -e \"console.log('Load this package with pi or install the pi peer locally for full type-checking.')\""
+  },
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  }
+}
