@@ -35,8 +35,8 @@ http://127.0.0.1:4315
 
 Override with:
 
-- `PATHSET_PI_AGUI_HOST`
-- `PATHSET_PI_AGUI_PORT`
+- `PI_AGUI_BRIDGE_HOST`
+- `PI_AGUI_BRIDGE_PORT`
 
 ## Pairing flow
 

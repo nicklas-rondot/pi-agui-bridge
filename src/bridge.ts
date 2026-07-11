@@ -54,8 +54,8 @@ export class PiAgUiBridge implements BridgeServerHandlers {
 
   constructor(pi: ExtensionAPI) {
     this.pi = pi;
-    this.host = process.env.PATHSET_PI_AGUI_HOST || DEFAULT_BRIDGE_HOST;
-    this.port = Number(process.env.PATHSET_PI_AGUI_PORT || DEFAULT_BRIDGE_PORT);
+    this.host = process.env.PI_AGUI_BRIDGE_HOST || DEFAULT_BRIDGE_HOST;
+    this.port = Number(process.env.PI_AGUI_BRIDGE_PORT || DEFAULT_BRIDGE_PORT);
     this.listeningHost = this.host;
     this.listeningPort = this.port;
     this.lastThinkingLevel = this.safeGetThinkingLevel();
@@ -143,7 +143,7 @@ export class PiAgUiBridge implements BridgeServerHandlers {
 
     this.pairingPromise = (async () => {
       const approved = await ctx.ui.confirm(
-        "Allow Pathset web app access?",
+        "Allow web app access?",
         [
           `Origin: ${normalizedOrigin}`,
           body.clientName ? `Client: ${body.clientName}` : undefined,
