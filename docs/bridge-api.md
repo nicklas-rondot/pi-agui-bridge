@@ -2,11 +2,16 @@
 
 ## Base URL
 
-Default:
+Default direct-local address:
 
 ```text
 http://127.0.0.1:4315
 ```
+
+When the bridge is behind Tailscale Serve or another reverse proxy, `/health` and `/pair` advertise either:
+
+- `PI_AGUI_BRIDGE_PUBLIC_URL` when set (absolute `http(s)` URL, no query string or fragment)
+- otherwise the request-visible host/protocol inferred from proxy headers when available
 
 ## Auth model
 
@@ -42,6 +47,8 @@ Response:
 ```
 
 ### `POST /pair`
+
+The returned URLs use the same advertised base URL as `/health`.
 
 Request:
 

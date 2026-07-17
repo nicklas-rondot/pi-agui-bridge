@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { AuthManager, normalizeOrigin } from "./auth.js";
-import { HttpError, type BridgeServerHandlers, BridgeHttpServer, SseChannel } from "./server.js";
+import { HttpError, type BridgeRequestContext, type BridgeServerHandlers, BridgeHttpServer, SseChannel } from "./server.js";
 import { buildBridgeState, getLatestUserTextFromRequest } from "./state.js";
 import type {
   AgentRequestBody,
@@ -41,6 +41,7 @@ export class PiAgUiBridge implements BridgeServerHandlers {
   private readonly pendingRuns: PendingRun[] = [];
   private readonly host: string;
   private readonly port: number;
+  private readonly publicBaseUrl?: string;
   private listeningHost: string;
   private listeningPort: number;
   private readonly pi: ExtensionAPI;
@@ -56,6 +57,7 @@ export class PiAgUiBridge implements BridgeServerHandlers {
     this.pi = pi;
     this.host = process.env.PI_AGUI_BRIDGE_HOST || DEFAULT_BRIDGE_HOST;
     this.port = Number(process.env.PI_AGUI_BRIDGE_PORT || DEFAULT_BRIDGE_PORT);
+    this.publicBaseUrl = normalizeConfiguredBaseUrl(process.env.PI_AGUI_BRIDGE_PUBLIC_URL);
     this.listeningHost = this.host;
     this.listeningPort = this.port;
     this.lastThinkingLevel = this.safeGetThinkingLevel();
@@ -109,16 +111,18 @@ export class PiAgUiBridge implements BridgeServerHandlers {
     this.setStatus(ctx);
   }
 
-  getHealth(): BridgeHealthResponse {
+  getHealth(requestContext: BridgeRequestContext): BridgeHealthResponse {
     const state = this.getState();
+    const publicBaseUrl = this.resolvePublicBaseUrl(requestContext.publicBaseUrl);
+    const endpoint = getEndpointInfo(publicBaseUrl);
     return {
       ok: true,
       bridgeName: BRIDGE_NAME,
       bridgeVersion: BRIDGE_VERSION,
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
-      host: this.listeningHost,
-      port: this.listeningPort,
-      url: this.requireBaseUrl(),
+      host: endpoint.host,
+      port: endpoint.port,
+      url: publicBaseUrl,
       pairedOriginCount: this.auth.count(),
       isStreaming: state.isStreaming,
       sessionId: state.sessionId,
@@ -126,12 +130,12 @@ export class PiAgUiBridge implements BridgeServerHandlers {
     };
   }
 
-  async pair(origin: string | undefined, body: PairRequestBody): Promise<PairResponseBody> {
+  async pair(requestContext: BridgeRequestContext, body: PairRequestBody): Promise<PairResponseBody> {
     if (this.pairingPromise) {
       return this.pairingPromise;
     }
 
-    const normalizedOrigin = normalizeOrigin(body.origin ?? origin);
+    const normalizedOrigin = normalizeOrigin(body.origin ?? requestContext.origin);
     if (!normalizedOrigin) {
       throw new HttpError(400, "A valid browser origin is required for pairing.");
     }
@@ -160,15 +164,16 @@ export class PiAgUiBridge implements BridgeServerHandlers {
       }
 
       const session = this.auth.issue(normalizedOrigin, body.clientName);
+      const publicBaseUrl = this.resolvePublicBaseUrl(requestContext.publicBaseUrl);
       return {
         ok: true,
         token: session.token,
         expiresAt: session.expiresAt,
         origin: session.origin,
-        bridgeUrl: this.requireBaseUrl(),
-        agentUrl: `${this.requireBaseUrl()}/agent`,
-        stateUrl: `${this.requireBaseUrl()}/state`,
-        eventsUrl: `${this.requireBaseUrl()}/events`,
+        bridgeUrl: publicBaseUrl,
+        agentUrl: appendPath(publicBaseUrl, "/agent"),
+        stateUrl: appendPath(publicBaseUrl, "/state"),
+        eventsUrl: appendPath(publicBaseUrl, "/events"),
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
       };
     })();
@@ -323,8 +328,9 @@ export class PiAgUiBridge implements BridgeServerHandlers {
   }
 
   describe(): string {
-    const baseUrl = this.baseUrl ?? "not-started";
-    return `${baseUrl} | paired origins: ${this.auth.count()} | streaming: ${this.isStreaming ? "yes" : "no"}`;
+    const localUrl = this.baseUrl ?? "not-started";
+    const endpointDescription = this.publicBaseUrl && this.publicBaseUrl !== localUrl ? `${localUrl} -> ${this.publicBaseUrl}` : localUrl;
+    return `${endpointDescription} | paired origins: ${this.auth.count()} | streaming: ${this.isStreaming ? "yes" : "no"}`;
   }
 
   resetAuth(): void {
@@ -533,8 +539,9 @@ export class PiAgUiBridge implements BridgeServerHandlers {
 
   private setStatus(ctx: ExtensionContext): void {
     if (!ctx.hasUI) return;
-    const url = this.baseUrl ?? `http://${this.host}:${this.port}`;
-    ctx.ui.setStatus("pi-agui", `AG-UI bridge ${url}`);
+    const localUrl = this.baseUrl ?? `http://${this.host}:${this.port}`;
+    const statusUrl = this.publicBaseUrl && this.publicBaseUrl !== localUrl ? `${localUrl} -> ${this.publicBaseUrl}` : localUrl;
+    ctx.ui.setStatus("pi-agui", `AG-UI bridge ${statusUrl}`);
   }
 
   private requireContext(): ExtensionContext {
@@ -551,6 +558,10 @@ export class PiAgUiBridge implements BridgeServerHandlers {
     return this.baseUrl;
   }
 
+  private resolvePublicBaseUrl(requestBaseUrl?: string): string {
+    return this.publicBaseUrl ?? requestBaseUrl ?? this.requireBaseUrl();
+  }
+
   private safeGetThinkingLevel(): string | undefined {
     try {
       return this.pi.getThinkingLevel();
@@ -558,4 +569,46 @@ export class PiAgUiBridge implements BridgeServerHandlers {
       return undefined;
     }
   }
+}
+
+function normalizeConfiguredBaseUrl(rawBaseUrl: string | undefined): string | undefined {
+  if (!rawBaseUrl?.trim()) {
+    return undefined;
+  }
+
+  const parsed = parseBaseUrl(rawBaseUrl.trim());
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("PI_AGUI_BRIDGE_PUBLIC_URL must use http:// or https://.");
+  }
+
+  if (parsed.search || parsed.hash) {
+    throw new Error("PI_AGUI_BRIDGE_PUBLIC_URL must not include a query string or fragment.");
+  }
+
+  return stripTrailingSlash(`${parsed.origin}${parsed.pathname}`);
+}
+
+function parseBaseUrl(baseUrl: string): URL {
+  try {
+    return new URL(baseUrl);
+  } catch {
+    throw new Error(`Invalid bridge base URL: ${baseUrl}`);
+  }
+}
+
+function stripTrailingSlash(url: string): string {
+  return url.endsWith("/") ? url.slice(0, -1) : url;
+}
+
+function appendPath(baseUrl: string, path: string): string {
+  return `${stripTrailingSlash(baseUrl)}${path}`;
+}
+
+function getEndpointInfo(baseUrl: string): { host: string; port: number } {
+  const parsed = parseBaseUrl(baseUrl);
+  const defaultPort = parsed.protocol === "https:" ? 443 : 80;
+  return {
+    host: parsed.hostname,
+    port: parsed.port ? Number(parsed.port) : defaultPort,
+  };
 }

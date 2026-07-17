@@ -66,9 +66,14 @@ export class SseChannel {
   }
 }
 
+export interface BridgeRequestContext {
+  origin?: string;
+  publicBaseUrl: string;
+}
+
 export interface BridgeServerHandlers {
-  getHealth(): BridgeHealthResponse;
-  pair(origin: string | undefined, body: PairRequestBody): Promise<PairResponseBody>;
+  getHealth(requestContext: BridgeRequestContext): BridgeHealthResponse;
+  pair(requestContext: BridgeRequestContext, body: PairRequestBody): Promise<PairResponseBody>;
   getState(): BridgeStateSnapshot;
   authorize(origin: string | undefined, token: string | undefined): AuthValidationResult;
   openEventsStream(channel: SseChannel): void;
@@ -115,8 +120,9 @@ export class BridgeHttpServer {
 
   private async handleRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
     try {
-      const url = new URL(request.url ?? "/", `http://${this.host}:${this.port}`);
-      const origin = normalizeOriginHeader(request.headers.origin);
+      const requestContext = buildRequestContext(request, this.host, this.port);
+      const url = new URL(request.url ?? "/", requestContext.publicBaseUrl);
+      const origin = requestContext.origin;
 
       if (request.method === "OPTIONS") {
         writeCorsHeaders(response, origin);
@@ -127,14 +133,14 @@ export class BridgeHttpServer {
 
       if (url.pathname === "/health" && request.method === "GET") {
         writeCorsHeaders(response, origin);
-        writeJson(response, 200, this.handlers.getHealth());
+        writeJson(response, 200, this.handlers.getHealth(requestContext));
         return;
       }
 
       if (url.pathname === "/pair" && request.method === "POST") {
         writeCorsHeaders(response, origin);
         const body = (await readJsonBody(request)) as PairRequestBody;
-        const result = await this.handlers.pair(origin, body);
+        const result = await this.handlers.pair(requestContext, body);
         writeJson(response, 200, result);
         return;
       }
@@ -178,6 +184,93 @@ export class BridgeHttpServer {
       }
     }
   }
+}
+
+function buildRequestContext(request: IncomingMessage, fallbackHost: string, fallbackPort: number): BridgeRequestContext {
+  return {
+    origin: normalizeOriginHeader(request.headers.origin),
+    publicBaseUrl: deriveRequestBaseUrl(request, fallbackHost, fallbackPort),
+  };
+}
+
+function deriveRequestBaseUrl(request: IncomingMessage, fallbackHost: string, fallbackPort: number): string {
+  const fallbackBaseUrl = `http://${fallbackHost}:${fallbackPort}`;
+  const forwarded = parseForwardedHeader(getFirstHeaderValue(request.headers.forwarded));
+  const protocol =
+    normalizeHttpProtocol(getFirstHeaderValue(request.headers["x-forwarded-proto"])) ??
+    normalizeHttpProtocol(forwarded.proto) ??
+    "http";
+  const host =
+    getFirstHeaderValue(request.headers["x-forwarded-host"]) ??
+    forwarded.host ??
+    getFirstHeaderValue(request.headers.host) ??
+    `${fallbackHost}:${fallbackPort}`;
+  const forwardedPort = getFirstHeaderValue(request.headers["x-forwarded-port"]);
+
+  try {
+    const publicUrl = new URL(`${protocol}://${host}`);
+    if (!publicUrl.port && forwardedPort) {
+      publicUrl.port = forwardedPort;
+    }
+    return publicUrl.origin;
+  } catch {
+    return fallbackBaseUrl;
+  }
+}
+
+function parseForwardedHeader(forwardedHeader: string | undefined): { proto?: string; host?: string } {
+  if (!forwardedHeader) {
+    return {};
+  }
+
+  const firstEntry = forwardedHeader
+    .split(",")
+    .map((value) => value.trim())
+    .find(Boolean);
+
+  if (!firstEntry) {
+    return {};
+  }
+
+  const result: { proto?: string; host?: string } = {};
+
+  for (const part of firstEntry.split(";")) {
+    const [rawKey, rawValue] = part.split("=", 2);
+    const key = rawKey?.trim().toLowerCase();
+    const value = rawValue?.trim().replace(/^"|"$/g, "");
+    if (!key || !value) continue;
+
+    if (key === "proto") {
+      result.proto = value;
+    } else if (key === "host") {
+      result.host = value;
+    }
+  }
+
+  return result;
+}
+
+function getFirstHeaderValue(headerValue: string | string[] | undefined): string | undefined {
+  const rawValue = Array.isArray(headerValue) ? headerValue[0] : headerValue;
+  if (!rawValue) return undefined;
+
+  const firstValue = rawValue
+    .split(",")
+    .map((value) => value.trim())
+    .find(Boolean);
+
+  return firstValue || undefined;
+}
+
+function normalizeHttpProtocol(protocol: string | undefined): "http" | "https" | undefined {
+  if (!protocol) return undefined;
+
+  const normalized = protocol.trim().toLowerCase().replace(/:$/, "");
+  if (normalized === "http" || normalized === "https") {
+    return normalized;
+  }
+
+  return undefined;
 }
 
 function normalizeOriginHeader(originHeader: string | string[] | undefined): string | undefined {
